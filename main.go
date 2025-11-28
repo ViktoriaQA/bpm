@@ -1,15 +1,395 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	chart "github.com/wcharczuk/go-chart/v2"
 )
+
+// KlineResponse - структура API відповіді для свічок
+type KlineResponse struct {
+	RetCode int    `json:"retCode"`
+	RetMsg  string `json:"retMsg"`
+	Result  struct {
+		List [][]interface{} `json:"list"`
+	} `json:"result"`
+}
+
+func tgHandleKline(symbol string) string {
+	if symbol == "" {
+		return "Вкажіть символ, наприклад: /kline BTCUSDT"
+	}
+	url := fmt.Sprintf("https://api.bybit.com/v5/market/kline?category=spot&symbol=%s&interval=1&limit=5", symbol)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "Помилка HTTP: " + err.Error()
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "Помилка читання: " + err.Error()
+	}
+	log.Printf("Bybit kline response for %s: %s", symbol, string(body))
+	var kline KlineResponse
+	if err := json.Unmarshal(body, &kline); err != nil {
+		return "Помилка JSON: " + err.Error()
+	}
+	if kline.RetCode != 0 {
+		return "Помилка API: " + kline.RetMsg
+	}
+	if len(kline.Result.List) == 0 {
+		return "Немає даних для " + symbol
+	}
+	// Візуалізація: графік закриття
+	closes := make([]float64, 0, len(kline.Result.List))
+	for _, item := range kline.Result.List {
+		if len(item) < 5 {
+			continue
+		}
+		closeVal, ok := item[4].(string)
+		if !ok {
+			continue
+		}
+		f, _ := parseFloat(closeVal)
+		closes = append(closes, f)
+	}
+	maxClose := 0.0
+	for _, v := range closes {
+		if v > maxClose {
+			maxClose = v
+		}
+	}
+	res := fmt.Sprintf("Останні 5 свічок %s (закриття):\n", symbol)
+	for i, v := range closes {
+		barLen := 0
+		if maxClose > 0 {
+			barLen = int((v / maxClose) * 20)
+		}
+		bar := strings.Repeat("█", barLen)
+		res += fmt.Sprintf("`%d: %8.2f %s`\n", i+1, v, bar)
+	}
+	return res
+}
+
+func tgHandleKlinePhoto(symbolsRaw string, bot *tgbotapi.BotAPI, chatID int64) string {
+	symbols := strings.Split(symbolsRaw, ",")
+	if len(symbols) == 0 || (len(symbols) == 1 && strings.TrimSpace(symbols[0]) == "") {
+		return "Вкажіть символи через кому, наприклад: /klinephoto BTCUSDT,ETHUSDT"
+	}
+	series := []chart.Series{}
+	legend := []string{}
+	maxLen := 0
+	var errors []string
+	for _, symbol := range symbols {
+		symbol = strings.TrimSpace(symbol)
+		if symbol == "" {
+			continue
+		}
+		url := fmt.Sprintf("https://api.bybit.com/v5/market/kline?category=spot&symbol=%s&interval=1&limit=20", symbol)
+		log.Printf("Requesting URL: %s", url)
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get(url)
+		if err != nil {
+			log.Printf("HTTP error for %s: %v", symbol, err)
+			errors = append(errors, fmt.Sprintf("%s: Помилка HTTP", symbol))
+			continue
+		}
+		log.Printf("HTTP status for %s: %d %s", symbol, resp.StatusCode, resp.Status)
+		log.Printf("HTTP headers for %s: %v", symbol, resp.Header)
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			log.Printf("Read error for %s: %v", symbol, err)
+			errors = append(errors, fmt.Sprintf("%s: Помилка читання", symbol))
+			continue
+		}
+		log.Printf("Bybit kline response for %s: %s", symbol, string(body))
+		var kline KlineResponse
+		if err := json.Unmarshal(body, &kline); err != nil {
+			log.Printf("JSON error for %s: %v", symbol, err)
+			errors = append(errors, fmt.Sprintf("%s: Помилка JSON", symbol))
+			continue
+		}
+		if kline.RetCode != 0 || len(kline.Result.List) == 0 {
+			log.Printf("API error for %s: %s", symbol, kline.RetMsg)
+			errors = append(errors, fmt.Sprintf("%s: Помилка API: %s", symbol, kline.RetMsg))
+			continue
+		}
+		closes := make([]float64, 0, len(kline.Result.List))
+		for _, item := range kline.Result.List {
+			if len(item) < 5 {
+				continue
+			}
+			closeVal, ok := item[4].(string)
+			if !ok {
+				continue
+			}
+			f, _ := parseFloat(closeVal)
+			closes = append(closes, f)
+		}
+		if len(closes) > maxLen {
+			maxLen = len(closes)
+		}
+		xValues := make([]float64, len(closes))
+		for i := range closes {
+			xValues[i] = float64(i + 1)
+		}
+		series = append(series, chart.ContinuousSeries{
+			Name:    symbol,
+			XValues: xValues,
+			YValues: closes,
+		})
+		legend = append(legend, symbol)
+	}
+	if len(series) == 0 {
+		return "Немає даних для заданих символів.\n" + strings.Join(errors, "\n")
+	}
+	graph := chart.Chart{
+		Width:      600,
+		Height:     300,
+		Background: chart.Style{Padding: chart.Box{Top: 20, Left: 40, Right: 20, Bottom: 20}},
+		Series:     series,
+		YAxis:      chart.YAxis{},
+		XAxis:      chart.XAxis{},
+		Elements: []chart.Renderable{
+			chart.Legend(&chart.Chart{
+				Series: series,
+			}),
+		},
+	}
+	buf := bytes.NewBuffer([]byte{})
+	if err := graph.Render(chart.PNG, buf); err != nil {
+		return "Помилка рендеру графіка: " + err.Error()
+	}
+	photoFileBytes := tgbotapi.FileBytes{Name: "kline_compare.png", Bytes: buf.Bytes()}
+	photoMsg := tgbotapi.NewPhoto(chatID, photoFileBytes)
+	photoMsg.Caption = "Порівняння графіків: " + strings.Join(legend, ", ")
+	_, err := bot.Send(photoMsg)
+	if err != nil {
+		return "Помилка надсилання фото: " + err.Error()
+	}
+	if len(errors) > 0 {
+		return "Графік порівняння надіслано!\n" + strings.Join(errors, "\n")
+	}
+	return "Графік порівняння надіслано!"
+}
+
+func tgHandleVolumePhoto(bot *tgbotapi.BotAPI, chatID int64) string {
+	tickers, err := fetchTickers()
+	if err != nil {
+		return "Error fetching volume: " + err.Error()
+	}
+	type pair struct {
+		Symbol string
+		Volume float64
+	}
+	var pairs []pair
+	for _, t := range tickers.Result.List {
+		v, err := parseFloat(t.Volume24h)
+		if err != nil {
+			continue
+		}
+		pairs = append(pairs, pair{t.Symbol, v})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Volume > pairs[j].Volume })
+	if len(pairs) == 0 {
+		return "Немає даних для об'єму."
+	}
+	max := 5
+	if len(pairs) < 5 {
+		max = len(pairs)
+	}
+	labels := make([]string, max)
+	values := make([]float64, max)
+	for i := 0; i < max; i++ {
+		labels[i] = pairs[i].Symbol
+		values[i] = pairs[i].Volume
+	}
+	bar := chart.BarChart{
+		Width:      600,
+		Height:     300,
+		Background: chart.Style{Padding: chart.Box{Top: 20, Left: 40, Right: 20, Bottom: 20}},
+		Bars:       []chart.Value{},
+	}
+	for i := 0; i < max; i++ {
+		bar.Bars = append(bar.Bars, chart.Value{Value: values[i], Label: labels[i]})
+	}
+	buf := bytes.NewBuffer([]byte{})
+	if err := bar.Render(chart.PNG, buf); err != nil {
+		return "Помилка рендеру графіка: " + err.Error()
+	}
+	photoFileBytes := tgbotapi.FileBytes{Name: "volume_bar.png", Bytes: buf.Bytes()}
+	photoMsg := tgbotapi.NewPhoto(chatID, photoFileBytes)
+	photoMsg.Caption = "Топ-5 монет за об'ємом"
+	_, err = bot.Send(photoMsg)
+	if err != nil {
+		return "Помилка надсилання фото: " + err.Error()
+	}
+	return "Графік об'єму надіслано!"
+}
+
+func tgHandleSalesPhoto(bot *tgbotapi.BotAPI, chatID int64) string {
+	tickers, err := fetchTickers()
+	if err != nil {
+		return "Error fetching sales: " + err.Error()
+	}
+	type pair struct {
+		Symbol string
+		Sales  float64
+	}
+	var pairs []pair
+	for _, t := range tickers.Result.List {
+		v, err := parseFloat(t.Volume24h)
+		if err != nil {
+			continue
+		}
+		pairs = append(pairs, pair{t.Symbol, v})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Sales > pairs[j].Sales })
+	if len(pairs) == 0 {
+		return "Немає даних для продажу."
+	}
+	max := 5
+	if len(pairs) < 5 {
+		max = len(pairs)
+	}
+	labels := make([]string, max)
+	values := make([]float64, max)
+	for i := 0; i < max; i++ {
+		labels[i] = pairs[i].Symbol
+		values[i] = pairs[i].Sales
+	}
+	bar := chart.BarChart{
+		Width:      600,
+		Height:     300,
+		Background: chart.Style{Padding: chart.Box{Top: 20, Left: 40, Right: 20, Bottom: 20}},
+		Bars:       []chart.Value{},
+	}
+	for i := 0; i < max; i++ {
+		bar.Bars = append(bar.Bars, chart.Value{Value: values[i], Label: labels[i]})
+	}
+	buf := bytes.NewBuffer([]byte{})
+	if err := bar.Render(chart.PNG, buf); err != nil {
+		return "Помилка рендеру графіка: " + err.Error()
+	}
+	photoFileBytes := tgbotapi.FileBytes{Name: "sales_bar.png", Bytes: buf.Bytes()}
+	photoMsg := tgbotapi.NewPhoto(chatID, photoFileBytes)
+	photoMsg.Caption = "Топ-5 монет за об'ємом продажу"
+	_, err = bot.Send(photoMsg)
+	if err != nil {
+		return "Помилка надсилання фото: " + err.Error()
+	}
+	return "Графік продажу надіслано!"
+}
+
+func parseFloat(s string) (float64, error) {
+	var f float64
+	_, err := fmt.Sscanf(s, "%f", &f)
+	return f, err
+}
+
+func tgHandlePrice(symbol string) string {
+	tickers, err := fetchTickers()
+	if err != nil {
+		return "Помилка отримання ціни: " + err.Error()
+	}
+	for _, t := range tickers.Result.List {
+		if t.Symbol == symbol {
+			return fmt.Sprintf("%s ціна: %s", symbol, t.LastPrice)
+		}
+	}
+	return "Символ не знайдено."
+}
+
+func tgHandleChange(symbol string) string {
+	tickers, err := fetchTickers()
+	if err != nil {
+		return "Помилка отримання даних: " + err.Error()
+	}
+	for _, t := range tickers.Result.List {
+		if t.Symbol == symbol {
+			return fmt.Sprintf("%s зміна за 24г: %s%%", symbol, t.Price24hPcnt)
+		}
+	}
+	return "Символ не знайдено."
+}
+
+func tgHandleVolume() string {
+	tickers, err := fetchTickers()
+	if err != nil {
+		return "Помилка отримання об'єму: " + err.Error()
+	}
+	type pair struct {
+		Symbol string
+		Volume float64
+	}
+	var pairs []pair
+	for _, t := range tickers.Result.List {
+		v, _ := parseFloat(t.Volume24h)
+		pairs = append(pairs, pair{t.Symbol, v})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Volume > pairs[j].Volume })
+	res := "Топ-5 за об'ємом:\n"
+	for i := 0; i < 5 && i < len(pairs); i++ {
+		res += fmt.Sprintf("%s: %.0f\n", pairs[i].Symbol, pairs[i].Volume)
+	}
+	return res
+}
+
+func tgHandleGainers() string {
+	tickers, err := fetchTickers()
+	if err != nil {
+		return "Помилка отримання лідерів: " + err.Error()
+	}
+	type pair struct {
+		Symbol string
+		Change float64
+	}
+	var pairs []pair
+	for _, t := range tickers.Result.List {
+		c, _ := parseFloat(t.Price24hPcnt)
+		pairs = append(pairs, pair{t.Symbol, c})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Change > pairs[j].Change })
+	res := "Топ-5 лідерів:\n"
+	for i := 0; i < 5 && i < len(pairs); i++ {
+		res += fmt.Sprintf("%s: %.2f%%\n", pairs[i].Symbol, pairs[i].Change)
+	}
+	return res
+}
+
+func tgHandleLosers() string {
+	tickers, err := fetchTickers()
+	if err != nil {
+		return "Помилка отримання аутсайдерів: " + err.Error()
+	}
+	type pair struct {
+		Symbol string
+		Change float64
+	}
+	var pairs []pair
+	for _, t := range tickers.Result.List {
+		c, _ := parseFloat(t.Price24hPcnt)
+		pairs = append(pairs, pair{t.Symbol, c})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Change < pairs[j].Change })
+	res := "Топ-5 аутсайдерів:\n"
+	for i := 0; i < 5 && i < len(pairs); i++ {
+		res += fmt.Sprintf("%s: %.2f%%\n", pairs[i].Symbol, pairs[i].Change)
+	}
+	return res
+}
 
 func main() {
 	log.SetOutput(os.Stdout)
@@ -22,7 +402,30 @@ func main() {
 	updates := bot.GetUpdatesChan(u)
 
 	alerts := make(map[string]float64)
-	go alertWorker(alerts)
+	go func() {
+		for {
+			time.Sleep(30 * time.Second)
+			if len(alerts) == 0 {
+				continue
+			}
+			tickers, err := fetchTickers()
+			if err != nil {
+				log.Printf("Alert fetch error: %v", err)
+				continue
+			}
+			for symbol, target := range alerts {
+				for _, t := range tickers.Result.List {
+					if t.Symbol == symbol {
+						price, _ := parseFloat(t.LastPrice)
+						if price >= target {
+							log.Printf("ALERT: %s price %.2f >= %.2f", symbol, price, target)
+							delete(alerts, symbol)
+						}
+					}
+				}
+			}
+		}
+	}()
 
 	for update := range updates {
 		if update.Message == nil {
@@ -36,11 +439,16 @@ func main() {
 				tgbotapi.NewKeyboardButtonRow(
 					tgbotapi.NewKeyboardButton("/price BTCUSDT"),
 					tgbotapi.NewKeyboardButton("/change BTCUSDT"),
+					tgbotapi.NewKeyboardButton("/kline BTCUSDT"),
 				),
 				tgbotapi.NewKeyboardButtonRow(
 					tgbotapi.NewKeyboardButton("/volume"),
 					tgbotapi.NewKeyboardButton("/gainers"),
 					tgbotapi.NewKeyboardButton("/losers"),
+				),
+				tgbotapi.NewKeyboardButtonRow(
+					tgbotapi.NewKeyboardButton("/klinephoto BTCUSDT,ETHUSDT"),
+					tgbotapi.NewKeyboardButton("/salesphoto"),
 				),
 			)
 			msg := tgbotapi.NewMessage(chatID, "Вітаю! Виберіть команду або введіть свою:")
@@ -76,255 +484,29 @@ func main() {
 			bot.Send(msg)
 			continue
 		}
+		if strings.HasPrefix(text, "/kline") {
+			symbol := strings.TrimSpace(strings.TrimPrefix(text, "/kline"))
+			msg := tgbotapi.NewMessage(chatID, tgHandleKline(symbol))
+			bot.Send(msg)
+			continue
+		}
+		if strings.HasPrefix(text, "/klinephoto") {
+			symbols := strings.TrimSpace(strings.TrimPrefix(text, "/klinephoto"))
+			msg := tgHandleKlinePhoto(symbols, bot, chatID)
+			bot.Send(tgbotapi.NewMessage(chatID, msg))
+			continue
+		}
+		if text == "/volumephoto" {
+			msg := tgHandleVolumePhoto(bot, chatID)
+			bot.Send(tgbotapi.NewMessage(chatID, msg))
+			continue
+		}
+		if text == "/salesphoto" {
+			msg := tgHandleSalesPhoto(bot, chatID)
+			bot.Send(tgbotapi.NewMessage(chatID, msg))
+			continue
+		}
 		msg := tgbotapi.NewMessage(chatID, "Невідома команда.")
 		bot.Send(msg)
 	}
-}
-
-// Telegram handlers (return string for bot)
-func tgHandlePrice(symbol string) string {
-	tickers, err := fetchTickers()
-	if err != nil {
-		return "Error fetching price: " + err.Error()
-	}
-	for _, t := range tickers.Result.List {
-		if t.Symbol == symbol {
-			return fmt.Sprintf("%s price: %s", symbol, t.LastPrice)
-		}
-	}
-	return "Symbol not found."
-}
-
-func tgHandleChange(symbol string) string {
-	tickers, err := fetchTickers()
-	if err != nil {
-		return "Error fetching change: " + err.Error()
-	}
-	for _, t := range tickers.Result.List {
-		if t.Symbol == symbol {
-			return fmt.Sprintf("%s 24h change: %s%%", symbol, t.Price24hPcnt)
-		}
-	}
-	return "Symbol not found."
-}
-
-func tgHandleVolume() string {
-	tickers, err := fetchTickers()
-	if err != nil {
-		return "Error fetching volume: " + err.Error()
-	}
-	type pair struct {
-		Symbol string
-		Volume float64
-	}
-	var pairs []pair
-	for _, t := range tickers.Result.List {
-		v, _ := parseFloat(t.Volume24h)
-		pairs = append(pairs, pair{t.Symbol, v})
-	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Volume > pairs[j].Volume })
-	res := "Top 5 by volume:\n"
-	for i := 0; i < 5 && i < len(pairs); i++ {
-		res += fmt.Sprintf("%s: %.2f\n", pairs[i].Symbol, pairs[i].Volume)
-	}
-	return res
-}
-
-func tgHandleGainers() string {
-	tickers, err := fetchTickers()
-	if err != nil {
-		return "Error fetching gainers: " + err.Error()
-	}
-	type pair struct {
-		Symbol string
-		Change float64
-	}
-	var pairs []pair
-	for _, t := range tickers.Result.List {
-		c, _ := parseFloat(t.Price24hPcnt)
-		pairs = append(pairs, pair{t.Symbol, c})
-	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Change > pairs[j].Change })
-	res := "Top 5 gainers:\n"
-	for i := 0; i < 5 && i < len(pairs); i++ {
-		res += fmt.Sprintf("%s: %.2f%%\n", pairs[i].Symbol, pairs[i].Change)
-	}
-	return res
-}
-
-func tgHandleLosers() string {
-	tickers, err := fetchTickers()
-	if err != nil {
-		return "Error fetching losers: " + err.Error()
-	}
-	type pair struct {
-		Symbol string
-		Change float64
-	}
-	var pairs []pair
-	for _, t := range tickers.Result.List {
-		c, _ := parseFloat(t.Price24hPcnt)
-		pairs = append(pairs, pair{t.Symbol, c})
-	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Change < pairs[j].Change })
-	res := "Top 5 losers:\n"
-	for i := 0; i < 5 && i < len(pairs); i++ {
-		res += fmt.Sprintf("%s: %.2f%%\n", pairs[i].Symbol, pairs[i].Change)
-	}
-	return res
-}
-
-func alertWorker(alerts map[string]float64) {
-	for {
-		time.Sleep(30 * time.Second)
-		if len(alerts) == 0 {
-			continue
-		}
-		tickers, err := fetchTickers()
-		if err != nil {
-			log.Printf("Alert fetch error: %v", err)
-			continue
-		}
-		for symbol, target := range alerts {
-			for _, t := range tickers.Result.List {
-				if t.Symbol == symbol {
-					price, _ := parseFloat(t.LastPrice)
-					if price >= target {
-						log.Printf("ALERT: %s price %.2f >= %.2f", symbol, price, target)
-						fmt.Printf("ALERT: %s price %.2f >= %.2f\n", symbol, price, target)
-						delete(alerts, symbol)
-					}
-				}
-			}
-		}
-	}
-}
-
-func handlePrice(symbol string) {
-	tickers, err := fetchTickers()
-	if err != nil {
-		log.Printf("Error fetching price for %s: %v", symbol, err)
-		fmt.Println("Error fetching price:", err)
-		return
-	}
-	found := false
-	for _, t := range tickers.Result.List {
-		if t.Symbol == symbol {
-			fmt.Printf("%s price: %s\n", symbol, t.LastPrice)
-			found = true
-			break
-		}
-	}
-	if !found {
-		log.Printf("Symbol not found: %s", symbol)
-		fmt.Println("Symbol not found.")
-	}
-}
-
-func handleChange(symbol string) {
-	tickers, err := fetchTickers()
-	if err != nil {
-		log.Printf("Error fetching change for %s: %v", symbol, err)
-		fmt.Println("Error fetching change:", err)
-		return
-	}
-	found := false
-	for _, t := range tickers.Result.List {
-		if t.Symbol == symbol {
-			fmt.Printf("%s 24h change: %s%%\n", symbol, t.Price24hPcnt)
-			found = true
-			break
-		}
-	}
-	if !found {
-		log.Printf("Symbol not found: %s", symbol)
-		fmt.Println("Symbol not found.")
-	}
-}
-
-func handleVolume() {
-	tickers, err := fetchTickers()
-	if err != nil {
-		log.Printf("Error fetching volume: %v", err)
-		fmt.Println("Error fetching volume:", err)
-		return
-	}
-	type pair struct {
-		Symbol string
-		Volume float64
-	}
-	var pairs []pair
-	for _, t := range tickers.Result.List {
-		v, err := parseFloat(t.Volume24h)
-		if err != nil {
-			log.Printf("Error parsing volume for %s: %v", t.Symbol, err)
-			continue
-		}
-		pairs = append(pairs, pair{t.Symbol, v})
-	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Volume > pairs[j].Volume })
-	fmt.Println("Top 5 by volume:")
-	for i := 0; i < 5 && i < len(pairs); i++ {
-		fmt.Printf("%s: %.2f\n", pairs[i].Symbol, pairs[i].Volume)
-	}
-}
-
-func handleGainers() {
-	tickers, err := fetchTickers()
-	if err != nil {
-		log.Printf("Error fetching gainers: %v", err)
-		fmt.Println("Error fetching gainers:", err)
-		return
-	}
-	type pair struct {
-		Symbol string
-		Change float64
-	}
-	var pairs []pair
-	for _, t := range tickers.Result.List {
-		c, err := parseFloat(t.Price24hPcnt)
-		if err != nil {
-			log.Printf("Error parsing change for %s: %v", t.Symbol, err)
-			continue
-		}
-		pairs = append(pairs, pair{t.Symbol, c})
-	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Change > pairs[j].Change })
-	fmt.Println("Top 5 gainers:")
-	for i := 0; i < 5 && i < len(pairs); i++ {
-		fmt.Printf("%s: %.2f%%\n", pairs[i].Symbol, pairs[i].Change)
-	}
-}
-
-func handleLosers() {
-	tickers, err := fetchTickers()
-	if err != nil {
-		log.Printf("Error fetching losers: %v", err)
-		fmt.Println("Error fetching losers:", err)
-		return
-	}
-	type pair struct {
-		Symbol string
-		Change float64
-	}
-	var pairs []pair
-	for _, t := range tickers.Result.List {
-		c, err := parseFloat(t.Price24hPcnt)
-		if err != nil {
-			log.Printf("Error parsing change for %s: %v", t.Symbol, err)
-			continue
-		}
-		pairs = append(pairs, pair{t.Symbol, c})
-	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Change < pairs[j].Change })
-	fmt.Println("Top 5 losers:")
-	for i := 0; i < 5 && i < len(pairs); i++ {
-		fmt.Printf("%s: %.2f%%\n", pairs[i].Symbol, pairs[i].Change)
-	}
-}
-
-func parseFloat(s string) (float64, error) {
-	var f float64
-	_, err := fmt.Sscanf(s, "%f", &f)
-	return f, err
 }

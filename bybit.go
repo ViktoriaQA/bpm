@@ -53,6 +53,7 @@ func fetchTickers() (*TickerResponse, error) {
 		log.Printf("Read body error: %v", err)
 		return nil, err
 	}
+	log.Printf("Bybit tickers response: %s", string(body))
 
 	var tickers TickerResponse
 	if err := json.Unmarshal(body, &tickers); err != nil {
