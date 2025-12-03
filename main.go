@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/joho/godotenv"
 	chart "github.com/wcharczuk/go-chart/v2"
 )
 
@@ -393,7 +394,13 @@ func tgHandleLosers() string {
 
 func main() {
 	log.SetOutput(os.Stdout)
-	bot, err := tgbotapi.NewBotAPI(os.Getenv("TELEGRAM_TOKEN"))
+	// Завантажуємо змінні середовища з .env (якщо файл існує)
+	_ = godotenv.Load()
+	token := os.Getenv("TELEGRAM_TOKEN")
+	if token == "" {
+		log.Panic("TELEGRAM_TOKEN не встановлено. Встановіть змінну середовища або додайте її в .env")
+	}
+	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		log.Panic(err)
 	}
