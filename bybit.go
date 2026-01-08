@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -40,19 +40,34 @@ func fetchTickers() (*TickerResponse, error) {
 	}
 	lastRequestTime = time.Now()
 
+	req, err := http.NewRequest("GET", bybitBaseURL, nil)
+	if err != nil {
+		log.Printf("Failed to create request: %v", err)
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("Referer", "https://bybit.com/")
+
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(bybitBaseURL)
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("HTTP request error: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Read body error: %v", err)
 		return nil, err
 	}
+
+	log.Printf("Bybit tickers response: %s", string(body)[:500]) // Log first 500 chars
 
 	var tickers TickerResponse
 	if err := json.Unmarshal(body, &tickers); err != nil {

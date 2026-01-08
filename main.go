@@ -8,8 +8,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -47,8 +49,19 @@ func tgHandleKline(symbol string) string {
 		return fmt.Sprintf("Символ %s не підтримується Bybit.", symbol)
 	}
 	url := fmt.Sprintf("https://api.bybit.com/v5/market/kline?category=spot&symbol=%s&interval=1&limit=5", symbol)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "Помилка створення запиту: " + err.Error()
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("Referer", "https://bybit.com/")
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "Помилка HTTP: " + err.Error()
 	}
@@ -133,8 +146,20 @@ func tgHandleKlinePhoto(symbolsRaw string, bot *tgbotapi.BotAPI, chatID int64) s
 		}
 		url := fmt.Sprintf("https://api.bybit.com/v5/market/kline?category=spot&symbol=%s&interval=1&limit=20", symbol)
 		log.Printf("Requesting URL: %s", url)
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			log.Printf("Failed to create request for %s: %v", symbol, err)
+			errors = append(errors, fmt.Sprintf("%s: Помилка створення запиту", symbol))
+			continue
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+		req.Header.Set("Connection", "keep-alive")
+		req.Header.Set("Upgrade-Insecure-Requests", "1")
 		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Get(url)
+		resp, err := client.Do(req)
 		if err != nil {
 			log.Printf("HTTP error for %s: %v", symbol, err)
 			errors = append(errors, fmt.Sprintf("%s: Помилка HTTP", symbol))
@@ -459,8 +484,18 @@ type FearGreedResponse struct {
 
 func tgHandleGreed() string {
 	url := "https://api.alternative.me/fng/?limit=1"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "Помилка створення запиту: " + err.Error()
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "Помилка HTTP: " + err.Error()
 	}
@@ -500,8 +535,53 @@ func tgHandleGreed() string {
 	return fmt.Sprintf("Індекс Страху та Жадібності: %s (%s)\nОновлено: %s\nЧас оновлення: %s", value, classification, dateStr, timeStr)
 }
 
+func checkSingleInstance() {
+	pidFile := "bot.pid"
+	if _, err := os.Stat(pidFile); err == nil {
+		// PID file exists, check if process is running
+		data, err := os.ReadFile(pidFile)
+		if err == nil {
+			var existingPid int
+			if _, err := fmt.Sscanf(string(data), "%d", &existingPid); err == nil {
+				// Check if process is running
+				process, err := os.FindProcess(existingPid)
+				if err == nil {
+					// Try to send signal 0 to check if process exists
+					err = process.Signal(syscall.Signal(0))
+					if err == nil {
+						log.Printf("Another instance is running (PID: %d). Exiting.", existingPid)
+						os.Exit(1)
+					}
+				}
+			}
+		}
+		// Remove stale PID file
+		os.Remove(pidFile)
+	}
+
+	// Write current PID to file
+	pid := os.Getpid()
+	file, err := os.Create(pidFile)
+	if err != nil {
+		log.Printf("Warning: Could not create PID file: %v", err)
+		return
+	}
+	defer file.Close()
+	fmt.Fprintf(file, "%d\n", pid)
+
+	// Handle cleanup on exit
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		os.Remove(pidFile)
+		os.Exit(0)
+	}()
+}
+
 func main() {
 	log.SetOutput(os.Stdout)
+	checkSingleInstance()
 	// Завантажуємо змінні середовища з .env (якщо файл існує)
 	_ = godotenv.Load()
 	token := os.Getenv("TELEGRAM_TOKEN")
