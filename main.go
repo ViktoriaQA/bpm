@@ -27,13 +27,18 @@ func makeRequestWithRetry(url string, maxRetries int) (*http.Response, error) {
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+		req.Header.Set("Accept", "application/json, text/plain, */*")
 		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 		req.Header.Set("Connection", "keep-alive")
 		req.Header.Set("Upgrade-Insecure-Requests", "1")
-		req.Header.Set("Referer", "https://bybit.com/")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Site", "same-site")
+		req.Header.Set("Cache-Control", "no-cache")
+		req.Header.Set("Pragma", "no-cache")
+		req.Header.Set("Referer", "https://www.bybit.com/")
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -611,43 +616,53 @@ func main() {
 	}
 
 	webhookURL := os.Getenv("WEBHOOK_URL")
-	if webhookURL == "" {
-		log.Panic("WEBHOOK_URL не встановлено. Встановіть змінну середовища або додайте її в .env")
-	}
-
-	// Set webhook
-	webhook, err := tgbotapi.NewWebhook(webhookURL)
-	if err != nil {
-		log.Panic(err)
-	}
-	_, err = bot.Request(webhook)
-	if err != nil {
-		log.Panic(err)
-	}
-
-	info, err := bot.GetWebhookInfo()
-	if err != nil {
-		log.Panic(err)
-	}
-	if info.LastErrorDate != 0 {
-		log.Printf("Telegram callback failed: %s", info.LastErrorMessage)
-	}
-
-	// For Railway, get port from env
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080" // fallback
-	}
-
-	updates := bot.ListenForWebhook("/webhook")
-	go func() {
-		log.Printf("Starting HTTP server on :%s", port)
-		if err := http.ListenAndServe(":"+port, nil); err != nil {
-			log.Panic("HTTP server error:", err)
+	var updates tgbotapi.UpdatesChannel
+	if webhookURL != "" {
+		// Use webhook mode for production
+		webhook, err := tgbotapi.NewWebhook(webhookURL)
+		if err != nil {
+			log.Panic(err)
 		}
-	}()
+		_, err = bot.Request(webhook)
+		if err != nil {
+			log.Panic(err)
+		}
 
-	log.Println("Bot is running with webhook")
+		info, err := bot.GetWebhookInfo()
+		if err != nil {
+			log.Panic(err)
+		}
+		if info.LastErrorDate != 0 {
+			log.Printf("Telegram callback failed: %s", info.LastErrorMessage)
+		}
+
+		// For deployment platforms like Render/Railway, get port from env
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "8081" // fallback
+		}
+
+		updates = bot.ListenForWebhook("/webhook")
+		go func() {
+			log.Printf("Starting HTTP server on :%s", port)
+			if err := http.ListenAndServe(":"+port, nil); err != nil {
+				log.Panic("HTTP server error:", err)
+			}
+		}()
+
+		log.Println("Bot is running with webhook")
+	} else {
+		// Use polling mode for local development
+		// First, delete any existing webhook
+		_, err = bot.Request(tgbotapi.DeleteWebhookConfig{})
+		if err != nil {
+			log.Printf("Failed to delete webhook: %v", err)
+		}
+		u := tgbotapi.NewUpdate(0)
+		u.Timeout = 60
+		updates = bot.GetUpdatesChan(u)
+		log.Println("Bot is running with polling")
+	}
 
 	alerts := make(map[string]float64)
 	go func() {
