@@ -616,6 +616,11 @@ func main() {
 	}
 
 	webhookURL := os.Getenv("WEBHOOK_URL")
+	if webhookURL == "" {
+		if renderURL := os.Getenv("RENDER_EXTERNAL_URL"); renderURL != "" {
+			webhookURL = renderURL + "/webhook"
+		}
+	}
 	var updates tgbotapi.UpdatesChannel
 	if webhookURL != "" {
 		// Use webhook mode for production

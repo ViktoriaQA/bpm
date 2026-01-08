@@ -1,0 +1,12 @@
+version: 1
+services:
+  - type: web
+    name: bpm-bot
+    runtime: go
+    region: frankfurt
+    plan: free
+    buildCommand: go build -o bpm .
+    startCommand: ./bpm
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
