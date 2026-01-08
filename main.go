@@ -592,6 +592,13 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
+
+	// Delete any existing webhook to avoid conflicts
+	_, err = bot.Request(tgbotapi.DeleteWebhookConfig{})
+	if err != nil {
+		log.Printf("Warning: Could not remove webhook: %v", err)
+	}
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 	updates := bot.GetUpdatesChan(u)
