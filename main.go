@@ -581,7 +581,6 @@ func checkSingleInstance() {
 
 func main() {
 	log.SetOutput(os.Stdout)
-	checkSingleInstance()
 	// Завантажуємо змінні середовища з .env (якщо файл існує)
 	_ = godotenv.Load()
 	token := os.Getenv("TELEGRAM_TOKEN")
@@ -593,17 +592,44 @@ func main() {
 		log.Panic(err)
 	}
 
-	// Delete any existing webhook to avoid conflicts
-	_, err = bot.Request(tgbotapi.DeleteWebhookConfig{})
-	if err != nil {
-		log.Printf("Warning: Could not remove webhook: %v", err)
+	webhookURL := os.Getenv("WEBHOOK_URL")
+	if webhookURL == "" {
+		log.Panic("WEBHOOK_URL не встановлено. Встановіть змінну середовища або додайте її в .env")
 	}
 
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-	updates := bot.GetUpdatesChan(u)
+	// Set webhook
+	webhook, err := tgbotapi.NewWebhook(webhookURL)
+	if err != nil {
+		log.Panic(err)
+	}
+	_, err = bot.Request(webhook)
+	if err != nil {
+		log.Panic(err)
+	}
 
-	log.Println("Bot is running with polling")
+	info, err := bot.GetWebhookInfo()
+	if err != nil {
+		log.Panic(err)
+	}
+	if info.LastErrorDate != 0 {
+		log.Printf("Telegram callback failed: %s", info.LastErrorMessage)
+	}
+
+	// For Railway, get port from env
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080" // fallback
+	}
+
+	updates := bot.ListenForWebhook("/webhook")
+	go func() {
+		log.Printf("Starting HTTP server on :%s", port)
+		if err := http.ListenAndServe(":"+port, nil); err != nil {
+			log.Panic("HTTP server error:", err)
+		}
+	}()
+
+	log.Println("Bot is running with webhook")
 
 	alerts := make(map[string]float64)
 	go func() {
