@@ -597,6 +597,17 @@ func main() {
 		log.Panic("WEBHOOK_URL не встановлено. Встановіть змінну середовища або додайте її в .env")
 	}
 
+	updates := bot.ListenForWebhook("/webhook")
+	go func() {
+		log.Println("Starting HTTP server on :8080")
+		if err := http.ListenAndServe(":8080", nil); err != nil {
+			log.Panic("HTTP server error:", err)
+		}
+	}()
+
+	// Wait a moment for server to start
+	time.Sleep(1 * time.Second)
+
 	webhook, err := tgbotapi.NewWebhook(webhookURL)
 	if err != nil {
 		log.Panic(err)
@@ -613,9 +624,6 @@ func main() {
 	if info.LastErrorDate != 0 {
 		log.Printf("Telegram callback failed: %s", info.LastErrorMessage)
 	}
-
-	updates := bot.ListenForWebhook("/webhook")
-	go http.ListenAndServe(":8080", nil)
 
 	log.Println("Bot is running with webhook")
 
