@@ -30,6 +30,22 @@ func tgHandleKline(symbol string) string {
 	if symbol == "" {
 		return "Вкажіть символ, наприклад: /kline BTCUSDT"
 	}
+	symbol = strings.ToUpper(symbol)
+	// Validate symbol against supported tickers
+	tickers, err := fetchTickers()
+	if err != nil {
+		return "Помилка отримання списку символів: " + err.Error()
+	}
+	supported := false
+	for _, t := range tickers.Result.List {
+		if t.Symbol == symbol {
+			supported = true
+			break
+		}
+	}
+	if !supported {
+		return fmt.Sprintf("Символ %s не підтримується Bybit.", symbol)
+	}
 	url := fmt.Sprintf("https://api.bybit.com/v5/market/kline?category=spot&symbol=%s&interval=1&limit=5", symbol)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(url)
@@ -43,7 +59,7 @@ func tgHandleKline(symbol string) string {
 	}
 	log.Printf("Bybit kline response for %s: %s", symbol, string(body))
 	var kline KlineResponse
-	if err := json.Unmarshal(body, &kline); err != nil {
+	if err = json.Unmarshal(body, &kline); err != nil {
 		return "Помилка JSON: " + err.Error()
 	}
 	if kline.RetCode != 0 {
@@ -88,13 +104,31 @@ func tgHandleKlinePhoto(symbolsRaw string, bot *tgbotapi.BotAPI, chatID int64) s
 	if len(symbols) == 0 || (len(symbols) == 1 && strings.TrimSpace(symbols[0]) == "") {
 		return "Вкажіть символи через кому, наприклад: /klinephoto BTCUSDT,ETHUSDT"
 	}
+	// Fetch supported tickers once
+	tickers, err := fetchTickers()
+	if err != nil {
+		return "Помилка отримання списку символів: " + err.Error()
+	}
+	// colors will be assigned using chart.GetDefaultColor
 	series := []chart.Series{}
 	legend := []string{}
 	maxLen := 0
 	var errors []string
-	for _, symbol := range symbols {
-		symbol = strings.TrimSpace(symbol)
+	for i, symbol := range symbols {
+		symbol = strings.TrimSpace(strings.ToUpper(symbol))
 		if symbol == "" {
+			continue
+		}
+		// Validate symbol
+		supported := false
+		for _, t := range tickers.Result.List {
+			if t.Symbol == symbol {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			errors = append(errors, fmt.Sprintf("%s: Символ не підтримується Bybit", symbol))
 			continue
 		}
 		url := fmt.Sprintf("https://api.bybit.com/v5/market/kline?category=spot&symbol=%s&interval=1&limit=20", symbol)
@@ -117,7 +151,7 @@ func tgHandleKlinePhoto(symbolsRaw string, bot *tgbotapi.BotAPI, chatID int64) s
 		}
 		log.Printf("Bybit kline response for %s: %s", symbol, string(body))
 		var kline KlineResponse
-		if err := json.Unmarshal(body, &kline); err != nil {
+		if err = json.Unmarshal(body, &kline); err != nil {
 			log.Printf("JSON error for %s: %v", symbol, err)
 			errors = append(errors, fmt.Sprintf("%s: Помилка JSON", symbol))
 			continue
@@ -139,17 +173,30 @@ func tgHandleKlinePhoto(symbolsRaw string, bot *tgbotapi.BotAPI, chatID int64) s
 			f, _ := parseFloat(closeVal)
 			closes = append(closes, f)
 		}
-		if len(closes) > maxLen {
-			maxLen = len(closes)
+		if len(closes) < 2 {
+			errors = append(errors, fmt.Sprintf("%s: Недостатньо даних для розрахунку змін", symbol))
+			continue
 		}
-		xValues := make([]float64, len(closes))
-		for i := range closes {
-			xValues[i] = float64(i + 1)
+		changes := make([]float64, len(closes)-1)
+		for j := 1; j < len(closes); j++ {
+			changes[j-1] = closes[j] - closes[j-1]
 		}
+		if len(changes) > maxLen {
+			maxLen = len(changes)
+		}
+		xValues := make([]float64, len(changes))
+		for j := range changes {
+			xValues[j] = float64(j + 1)
+		}
+		color := chart.GetDefaultColor(i)
 		series = append(series, chart.ContinuousSeries{
 			Name:    symbol,
 			XValues: xValues,
-			YValues: closes,
+			YValues: changes,
+			Style: chart.Style{
+				StrokeWidth: 3.0,
+				StrokeColor: color,
+			},
 		})
 		legend = append(legend, symbol)
 	}
@@ -170,13 +217,13 @@ func tgHandleKlinePhoto(symbolsRaw string, bot *tgbotapi.BotAPI, chatID int64) s
 		},
 	}
 	buf := bytes.NewBuffer([]byte{})
-	if err := graph.Render(chart.PNG, buf); err != nil {
+	if err = graph.Render(chart.PNG, buf); err != nil {
 		return "Помилка рендеру графіка: " + err.Error()
 	}
 	photoFileBytes := tgbotapi.FileBytes{Name: "kline_compare.png", Bytes: buf.Bytes()}
 	photoMsg := tgbotapi.NewPhoto(chatID, photoFileBytes)
-	photoMsg.Caption = "Порівняння графіків: " + strings.Join(legend, ", ")
-	_, err := bot.Send(photoMsg)
+	photoMsg.Caption = "Порівняння годинних змін: " + strings.Join(legend, ", ")
+	_, err = bot.Send(photoMsg)
 	if err != nil {
 		return "Помилка надсилання фото: " + err.Error()
 	}
@@ -301,6 +348,10 @@ func parseFloat(s string) (float64, error) {
 }
 
 func tgHandlePrice(symbol string) string {
+	if symbol == "" {
+		return "Вкажіть символ, наприклад: /price BTCUSDT"
+	}
+	symbol = strings.ToUpper(symbol)
 	tickers, err := fetchTickers()
 	if err != nil {
 		return "Помилка отримання ціни: " + err.Error()
@@ -314,6 +365,10 @@ func tgHandlePrice(symbol string) string {
 }
 
 func tgHandleChange(symbol string) string {
+	if symbol == "" {
+		return "Вкажіть символ, наприклад: /change BTCUSDT"
+	}
+	symbol = strings.ToUpper(symbol)
 	tickers, err := fetchTickers()
 	if err != nil {
 		return "Помилка отримання даних: " + err.Error()
@@ -392,6 +447,59 @@ func tgHandleLosers() string {
 	return res
 }
 
+// FearGreedResponse represents the Alternative.me API response for Fear & Greed Index
+type FearGreedResponse struct {
+	Name string `json:"name"`
+	Data []struct {
+		Value               string `json:"value"`
+		ValueClassification string `json:"value_classification"`
+		Timestamp           string `json:"timestamp"`
+	} `json:"data"`
+}
+
+func tgHandleGreed() string {
+	url := "https://api.alternative.me/fng/?limit=1"
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "Помилка HTTP: " + err.Error()
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "Помилка читання: " + err.Error()
+	}
+	var fg FearGreedResponse
+	if err = json.Unmarshal(body, &fg); err != nil {
+		return "Помилка JSON: " + err.Error()
+	}
+	if len(fg.Data) == 0 {
+		return "Немає даних для індексу Страху та Жадібності."
+	}
+	value := fg.Data[0].Value
+	classification := fg.Data[0].ValueClassification
+	// Translate classification to Ukrainian
+	switch classification {
+	case "Extreme Fear":
+		classification = "Екстремальний страх"
+	case "Fear":
+		classification = "Страх"
+	case "Neutral":
+		classification = "Нейтрально"
+	case "Greed":
+		classification = "Жадібність"
+	case "Extreme Greed":
+		classification = "Екстремальна жадібність"
+	}
+	timestamp := fg.Data[0].Timestamp
+	ts, _ := parseFloat(timestamp)
+	location, _ := time.LoadLocation("Europe/Kiev")
+	t := time.Unix(int64(ts), 0).In(location)
+	dateStr := t.Format("02-01-2006")
+	timeStr := t.Format("15:04:05")
+	return fmt.Sprintf("Індекс Страху та Жадібності: %s (%s)\nОновлено: %s\nЧас оновлення: %s", value, classification, dateStr, timeStr)
+}
+
 func main() {
 	log.SetOutput(os.Stdout)
 	// Завантажуємо змінні середовища з .env (якщо файл існує)
@@ -444,7 +552,7 @@ func main() {
 		if text == "/start" {
 			keyboard := tgbotapi.NewReplyKeyboard(
 				tgbotapi.NewKeyboardButtonRow(
-					tgbotapi.NewKeyboardButton("/price BTCUSDT"),
+					tgbotapi.NewKeyboardButton("BTCUSDT"),
 					tgbotapi.NewKeyboardButton("/change BTCUSDT"),
 					tgbotapi.NewKeyboardButton("/kline BTCUSDT"),
 				),
@@ -452,14 +560,42 @@ func main() {
 					tgbotapi.NewKeyboardButton("/volume"),
 					tgbotapi.NewKeyboardButton("/gainers"),
 					tgbotapi.NewKeyboardButton("/losers"),
+					tgbotapi.NewKeyboardButton("/greed"),
 				),
 				tgbotapi.NewKeyboardButtonRow(
 					tgbotapi.NewKeyboardButton("/klinephoto BTCUSDT,ETHUSDT"),
 					tgbotapi.NewKeyboardButton("/salesphoto"),
 				),
 			)
-			msg := tgbotapi.NewMessage(chatID, "Вітаю! Виберіть команду або введіть свою:")
+			//msg := tgbotapi.NewMessage(chatID, "Вітаю! Виберіть команду або введіть свою:")
+			//
+			commandsDescription := `👋 Вітаю!
+			Оберіть команду нижче або введіть свою:
+
+			💰 Ціни та зміни
+			/price - поточна ціна
+			/change — зміна за 24 год.
+
+			📊 Ринок
+			/volume — топ-5 пар за обсягом
+			/gainers — топ-5 лідерів зростання
+			/losers — топ-5 лідерів падіння
+			/greed — індекс Страху та Жадібності
+
+			📈 Графіки та свічки
+			/kline — останні 5 свічок BTC/USDT
+			/klinephoto — графік для кількох пар
+			/volumephoto — графік топ-5 за обсягом
+			/salesphoto — графік топ-5 за продажами
+			`
+			msg := tgbotapi.NewMessage(chatID, commandsDescription)
 			msg.ReplyMarkup = keyboard
+			bot.Send(msg)
+			continue
+		}
+
+		if text == "BTCUSDT" {
+			msg := tgbotapi.NewMessage(chatID, tgHandlePrice("BTCUSDT"))
 			bot.Send(msg)
 			continue
 		}
@@ -491,9 +627,8 @@ func main() {
 			bot.Send(msg)
 			continue
 		}
-		if strings.HasPrefix(text, "/kline") {
-			symbol := strings.TrimSpace(strings.TrimPrefix(text, "/kline"))
-			msg := tgbotapi.NewMessage(chatID, tgHandleKline(symbol))
+		if text == "/greed" {
+			msg := tgbotapi.NewMessage(chatID, tgHandleGreed())
 			bot.Send(msg)
 			continue
 		}
@@ -501,6 +636,12 @@ func main() {
 			symbols := strings.TrimSpace(strings.TrimPrefix(text, "/klinephoto"))
 			msg := tgHandleKlinePhoto(symbols, bot, chatID)
 			bot.Send(tgbotapi.NewMessage(chatID, msg))
+			continue
+		}
+		if strings.HasPrefix(text, "/kline") {
+			symbol := strings.TrimSpace(strings.TrimPrefix(text, "/kline"))
+			msg := tgbotapi.NewMessage(chatID, tgHandleKline(symbol))
+			bot.Send(msg)
 			continue
 		}
 		if text == "/volumephoto" {
