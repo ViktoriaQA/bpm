@@ -581,7 +581,6 @@ func checkSingleInstance() {
 
 func main() {
 	log.SetOutput(os.Stdout)
-	checkSingleInstance()
 	// Завантажуємо змінні середовища з .env (якщо файл існує)
 	_ = godotenv.Load()
 	token := os.Getenv("TELEGRAM_TOKEN")
@@ -592,9 +591,33 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-	updates := bot.GetUpdatesChan(u)
+
+	webhookURL := os.Getenv("WEBHOOK_URL")
+	if webhookURL == "" {
+		log.Panic("WEBHOOK_URL не встановлено. Встановіть змінну середовища або додайте її в .env")
+	}
+
+	webhook, err := tgbotapi.NewWebhook(webhookURL)
+	if err != nil {
+		log.Panic(err)
+	}
+	_, err = bot.Request(webhook)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	info, err := bot.GetWebhookInfo()
+	if err != nil {
+		log.Panic(err)
+	}
+	if info.LastErrorDate != 0 {
+		log.Printf("Telegram callback failed: %s", info.LastErrorMessage)
+	}
+
+	updates := bot.ListenForWebhook("/webhook")
+	go http.ListenAndServe(":8080", nil)
+
+	log.Println("Bot is running with webhook")
 
 	alerts := make(map[string]float64)
 	go func() {
