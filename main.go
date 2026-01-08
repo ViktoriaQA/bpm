@@ -19,6 +19,49 @@ import (
 	chart "github.com/wcharczuk/go-chart/v2"
 )
 
+// makeRequestWithRetry makes an HTTP request with retry on 403 and other errors
+func makeRequestWithRetry(url string, maxRetries int) (*http.Response, error) {
+	const baseWait = 5 * time.Second
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+		req.Header.Set("Connection", "keep-alive")
+		req.Header.Set("Upgrade-Insecure-Requests", "1")
+		req.Header.Set("Referer", "https://bybit.com/")
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("HTTP error for %s: %v", url, err)
+			if attempt < maxRetries {
+				wait := time.Duration(attempt) * baseWait
+				log.Printf("Retrying in %v due to HTTP error", wait)
+				time.Sleep(wait)
+				continue
+			}
+			return nil, err
+		}
+		if resp.StatusCode == 403 {
+			log.Printf("403 Forbidden for %s", url)
+			resp.Body.Close()
+			if attempt < maxRetries {
+				wait := time.Duration(attempt) * baseWait
+				log.Printf("Retrying in %v due to 403", wait)
+				time.Sleep(wait)
+				continue
+			}
+			return nil, fmt.Errorf("403 Forbidden after %d attempts", maxRetries)
+		}
+		return resp, nil
+	}
+	return nil, fmt.Errorf("failed after %d attempts", maxRetries)
+}
+
 // KlineResponse - структура API відповіді для свічок
 type KlineResponse struct {
 	RetCode int    `json:"retCode"`
@@ -49,19 +92,7 @@ func tgHandleKline(symbol string) string {
 		return fmt.Sprintf("Символ %s не підтримується Bybit.", symbol)
 	}
 	url := fmt.Sprintf("https://api.bybit.com/v5/market/kline?category=spot&symbol=%s&interval=1&limit=5", symbol)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "Помилка створення запиту: " + err.Error()
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	req.Header.Set("Referer", "https://bybit.com/")
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := makeRequestWithRetry(url, 3)
 	if err != nil {
 		return "Помилка HTTP: " + err.Error()
 	}
@@ -146,20 +177,7 @@ func tgHandleKlinePhoto(symbolsRaw string, bot *tgbotapi.BotAPI, chatID int64) s
 		}
 		url := fmt.Sprintf("https://api.bybit.com/v5/market/kline?category=spot&symbol=%s&interval=1&limit=20", symbol)
 		log.Printf("Requesting URL: %s", url)
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			log.Printf("Failed to create request for %s: %v", symbol, err)
-			errors = append(errors, fmt.Sprintf("%s: Помилка створення запиту", symbol))
-			continue
-		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-		req.Header.Set("Connection", "keep-alive")
-		req.Header.Set("Upgrade-Insecure-Requests", "1")
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
+		resp, err := makeRequestWithRetry(url, 3)
 		if err != nil {
 			log.Printf("HTTP error for %s: %v", symbol, err)
 			errors = append(errors, fmt.Sprintf("%s: Помилка HTTP", symbol))

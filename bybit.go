@@ -85,6 +85,17 @@ func fetchTickers() (*TickerResponse, error) {
 
 		log.Printf("Bybit tickers response: %s", string(body)[:500]) // Log first 500 chars
 
+		if resp.StatusCode == 403 {
+			log.Printf("Received 403 Forbidden. Retrying...")
+			if attempt < maxRetries {
+				wait := time.Duration(attempt) * 5 * time.Second // Exponential backoff
+				log.Printf("Retrying in %v due to 403 error", wait)
+				time.Sleep(wait)
+				continue
+			}
+			return nil, fmt.Errorf("403 Forbidden after %d attempts", maxRetries)
+		}
+
 		if len(body) > 0 && body[0] == '<' {
 			log.Printf("Received HTML response instead of JSON. Body starts with: %s", string(body)[:200])
 			// Retry on HTML response
