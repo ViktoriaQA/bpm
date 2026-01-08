@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
 	"time"
 )
 
@@ -53,7 +55,19 @@ func fetchTickers() (*TickerResponse, error) {
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 	req.Header.Set("Referer", "https://bybit.com/")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// Use proxy if set in environment
+	transport := &http.Transport{}
+	if proxyURL := os.Getenv("HTTP_PROXY"); proxyURL != "" {
+		if parsedURL, err := url.Parse(proxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(parsedURL)
+		} else {
+			log.Printf("Invalid proxy URL: %v", err)
+		}
+	}
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("HTTP request error: %v", err)
@@ -68,6 +82,11 @@ func fetchTickers() (*TickerResponse, error) {
 	}
 
 	log.Printf("Bybit tickers response: %s", string(body)[:500]) // Log first 500 chars
+
+	if len(body) > 0 && body[0] == '<' {
+		log.Printf("Received HTML response instead of JSON. Body starts with: %s", string(body)[:200])
+		return nil, fmt.Errorf("API blocked or unavailable (HTML response)")
+	}
 
 	var tickers TickerResponse
 	if err := json.Unmarshal(body, &tickers); err != nil {
