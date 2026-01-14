@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -102,7 +103,16 @@ func tgHandleKline(symbol string) string {
 		return "Помилка HTTP: " + err.Error()
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	var reader io.Reader = resp.Body
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		gzipReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return "Помилка gzip: " + err.Error()
+		}
+		defer gzipReader.Close()
+		reader = gzipReader
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return "Помилка читання: " + err.Error()
 	}
@@ -190,7 +200,19 @@ func tgHandleKlinePhoto(symbolsRaw string, bot *tgbotapi.BotAPI, chatID int64) s
 		}
 		log.Printf("HTTP status for %s: %d %s", symbol, resp.StatusCode, resp.Status)
 		log.Printf("HTTP headers for %s: %v", symbol, resp.Header)
-		body, err := io.ReadAll(resp.Body)
+		var reader io.Reader = resp.Body
+		if resp.Header.Get("Content-Encoding") == "gzip" {
+			gzipReader, err := gzip.NewReader(resp.Body)
+			if err != nil {
+				log.Printf("Gzip error for %s: %v", symbol, err)
+				errors = append(errors, fmt.Sprintf("%s: Помилка gzip", symbol))
+				resp.Body.Close()
+				continue
+			}
+			defer gzipReader.Close()
+			reader = gzipReader
+		}
+		body, err := io.ReadAll(reader)
 		resp.Body.Close()
 		if err != nil {
 			log.Printf("Read error for %s: %v", symbol, err)
@@ -312,11 +334,26 @@ func tgHandleVolumePhoto(bot *tgbotapi.BotAPI, chatID int64) string {
 		labels[i] = pairs[i].Symbol
 		values[i] = pairs[i].Volume
 	}
+	maxValue := 0.0
+	for _, v := range values {
+		if v > maxValue {
+			maxValue = v
+		}
+	}
+	ticks := []chart.Tick{}
+	if maxValue > 0 {
+		ticks = append(ticks, chart.Tick{Value: maxValue / 5, Label: fmt.Sprintf("%.0f", maxValue/5)})
+		ticks = append(ticks, chart.Tick{Value: 2 * maxValue / 5, Label: fmt.Sprintf("%.0f", 2*maxValue/5)})
+		ticks = append(ticks, chart.Tick{Value: 3 * maxValue / 5, Label: fmt.Sprintf("%.0f", 3*maxValue/5)})
+		ticks = append(ticks, chart.Tick{Value: 4 * maxValue / 5, Label: fmt.Sprintf("%.0f", 4*maxValue/5)})
+		ticks = append(ticks, chart.Tick{Value: maxValue, Label: fmt.Sprintf("%.0f", maxValue)})
+	}
 	bar := chart.BarChart{
-		Width:      600,
+		Width:      800,
 		Height:     300,
 		Background: chart.Style{Padding: chart.Box{Top: 20, Left: 40, Right: 20, Bottom: 20}},
 		Bars:       []chart.Value{},
+		YAxis:      chart.YAxis{Ticks: ticks},
 	}
 	for i := 0; i < max; i++ {
 		bar.Bars = append(bar.Bars, chart.Value{Value: values[i], Label: labels[i]})
@@ -346,7 +383,7 @@ func tgHandleSalesPhoto(bot *tgbotapi.BotAPI, chatID int64) string {
 	}
 	var pairs []pair
 	for _, t := range tickers.Result.List {
-		v, err := parseFloat(t.Volume24h)
+		v, err := parseFloat(t.Turnover24h)
 		if err != nil {
 			continue
 		}
@@ -366,11 +403,26 @@ func tgHandleSalesPhoto(bot *tgbotapi.BotAPI, chatID int64) string {
 		labels[i] = pairs[i].Symbol
 		values[i] = pairs[i].Sales
 	}
+	maxValue := 0.0
+	for _, v := range values {
+		if v > maxValue {
+			maxValue = v
+		}
+	}
+	ticks := []chart.Tick{}
+	if maxValue > 0 {
+		ticks = append(ticks, chart.Tick{Value: maxValue / 5, Label: fmt.Sprintf("%.0f", maxValue/5)})
+		ticks = append(ticks, chart.Tick{Value: 2 * maxValue / 5, Label: fmt.Sprintf("%.0f", 2*maxValue/5)})
+		ticks = append(ticks, chart.Tick{Value: 3 * maxValue / 5, Label: fmt.Sprintf("%.0f", 3*maxValue/5)})
+		ticks = append(ticks, chart.Tick{Value: 4 * maxValue / 5, Label: fmt.Sprintf("%.0f", 4*maxValue/5)})
+		ticks = append(ticks, chart.Tick{Value: maxValue, Label: fmt.Sprintf("%.0f", maxValue)})
+	}
 	bar := chart.BarChart{
-		Width:      600,
+		Width:      800,
 		Height:     300,
 		Background: chart.Style{Padding: chart.Box{Top: 20, Left: 40, Right: 20, Bottom: 20}},
 		Bars:       []chart.Value{},
+		YAxis:      chart.YAxis{Ticks: ticks},
 	}
 	for i := 0; i < max; i++ {
 		bar.Bars = append(bar.Bars, chart.Value{Value: values[i], Label: labels[i]})
@@ -523,7 +575,16 @@ func tgHandleGreed() string {
 		return "Помилка HTTP: " + err.Error()
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	var reader io.Reader = resp.Body
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		gzipReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return "Помилка gzip: " + err.Error()
+		}
+		defer gzipReader.Close()
+		reader = gzipReader
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return "Помилка читання: " + err.Error()
 	}

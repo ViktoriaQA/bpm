@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ type TickerResponse struct {
 			LastPrice    string `json:"lastPrice"`
 			Price24hPcnt string `json:"price24hPcnt"`
 			Volume24h    string `json:"volume24h"`
+			Turnover24h  string `json:"turnover24h"`
 		} `json:"list"`
 	} `json:"result"`
 }
@@ -77,7 +79,17 @@ func fetchTickers() (*TickerResponse, error) {
 		}
 		defer resp.Body.Close()
 
-		body, err := io.ReadAll(resp.Body)
+		var reader io.Reader = resp.Body
+		if resp.Header.Get("Content-Encoding") == "gzip" {
+			gzipReader, err := gzip.NewReader(resp.Body)
+			if err != nil {
+				log.Printf("Failed to create gzip reader: %v", err)
+				return nil, err
+			}
+			defer gzipReader.Close()
+			reader = gzipReader
+		}
+		body, err := io.ReadAll(reader)
 		if err != nil {
 			log.Printf("Read body error: %v", err)
 			return nil, err
